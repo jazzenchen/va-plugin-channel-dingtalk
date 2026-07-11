@@ -6,6 +6,7 @@
 import {
   BlockRenderer,
   type BlockKind,
+  type ChannelTarget,
   type VerboseConfig,
 } from "@vibearound/plugin-channel-sdk";
 import type { DingTalkBot } from "./bot.js";
@@ -26,8 +27,8 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     this.log = log;
   }
 
-  protected async sendText(chatId: string, text: string): Promise<void> {
-    await this.dingBot.sendText(chatId, text);
+  protected async sendText(target: ChannelTarget, text: string): Promise<void> {
+    await this.dingBot.sendText(target, text);
   }
 
   protected formatContent(kind: BlockKind, content: string, _sealed: boolean): string {
@@ -38,11 +39,11 @@ export class AgentStreamHandler extends BlockRenderer<string> {
     }
   }
 
-  protected async sendBlock(chatId: string, _kind: BlockKind, content: string): Promise<string | null> {
+  protected async sendBlock(target: ChannelTarget, _kind: BlockKind, content: string): Promise<string | null> {
     try {
-      await this.dingBot.sendMarkdown(chatId, "VibeAround", content);
+      await this.dingBot.sendMarkdown(target, "VibeAround", content);
     } catch (err) {
-      this.log("warn", `sendBlock failed chat=${chatId}: ${String(err)}`);
+      this.log("warn", `sendBlock failed chat=${target.chatId}: ${String(err)}`);
     }
     return null;
   }
