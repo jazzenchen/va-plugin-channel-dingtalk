@@ -15,8 +15,13 @@ import {
   TOPIC_ROBOT,
   type DWClientDownStream,
 } from "dingtalk-stream";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
-import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedImage {
@@ -72,16 +77,27 @@ export class DingTalkBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
   /** Stable client id for robot — used as robotCode in the download API. */
   private readonly clientId: string;
   // Map sessionId (chatId) → latest sessionWebhook for replies
   private webhooks = new Map<string, { url: string; expires: number }>();
 
-  constructor(config: DingTalkConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: DingTalkConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
     this.clientId = config.client_id;
 
     this.client = new DWClient({
@@ -343,6 +359,24 @@ export class DingTalkBot {
     this.log("debug", `message chat=${chatId} sender=${senderId} type=${msg.msgtype} preview=${preview}`);
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
+    const isDirectMessage = msg.conversationType === "1";
+    const inboundContext = {
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId,
+      platformMessageId: msgId,
+      scope: isDirectMessage ? "dm" : "group",
+      // DingTalk robot group callbacks are only delivered for messages that
+      // explicitly address the robot.
+      addressedBy: isDirectMessage ? "dm" : "mention",
+    } satisfies ChannelInboundContext;
+
+    if (firstText && isChannelStopCommand(firstText)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      return;
+    }
+
     if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
       return;
     }
@@ -350,10 +384,11 @@ export class DingTalkBot {
     this.streamHandler?.onPromptSent(chatId);
 
     try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
+      const response = await sendChannelPrompt(this.agent, {
+        context: inboundContext,
         prompt: contentBlocks,
       });
+      if (!response) return;
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
       this.streamHandler?.onTurnEnd(chatId);
     } catch (error: unknown) {
