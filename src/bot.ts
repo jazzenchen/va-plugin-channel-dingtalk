@@ -112,6 +112,10 @@ export class DingTalkBot {
     this.streamHandler = handler;
   }
 
+  public isConnected(): boolean {
+    return this.client.connected;
+  }
+
   /** Get the latest webhook for a session, if still valid. */
   private getWebhook(target: ChannelTarget): string | null {
     if (!target.replyTo) return null;
