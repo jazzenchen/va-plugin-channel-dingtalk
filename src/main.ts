@@ -15,7 +15,7 @@ runChannelPlugin({
   name: "vibearound-dingtalk",
   version: "0.1.0",
   requiredConfig: ["client_id", "client_secret"],
-  createBot: ({ config, agent, log, cacheDir }) =>
+  createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new DingTalkBot(
       {
         client_id: config.client_id as string,
@@ -24,7 +24,10 @@ runChannelPlugin({
       agent,
       log,
       cacheDir,
+      channelInstanceId,
+      actorId,
     ),
   createRenderer: (bot, log, verbose) =>
     new AgentStreamHandler(bot, log, verbose),
+  healthCheck: async (bot) => bot.isConnected(),
 });
