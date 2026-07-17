@@ -10,13 +10,20 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import axios from "axios";
+import { assertDeclaredSizeWithinLimit, MAX_MEDIA_BYTES } from "./bounded-response.js";
 import {
   DWClient,
   TOPIC_ROBOT,
   type DWClientDownStream,
 } from "dingtalk-stream";
-import type { Agent, ContentBlock } from "@vibearound/plugin-channel-sdk";
-import { extractErrorMessage } from "@vibearound/plugin-channel-sdk";
+import type { Agent, ChannelInboundContext, ChannelTarget, ContentBlock } from "@vibearound/plugin-channel-sdk";
+import {
+  cancelChannelPrompt,
+  channelTargetFromInboundContext,
+  extractErrorMessage,
+  isChannelStopCommand,
+  sendChannelPrompt,
+} from "@vibearound/plugin-channel-sdk";
 import type { AgentStreamHandler } from "./agent-stream.js";
 
 interface DownloadedImage {
@@ -72,16 +79,27 @@ export class DingTalkBot {
   private agent: Agent;
   private log: LogFn;
   private cacheDir: string;
+  private channelInstanceId: string;
+  private actorId: string;
   private streamHandler: AgentStreamHandler | null = null;
   /** Stable client id for robot — used as robotCode in the download API. */
   private readonly clientId: string;
-  // Map sessionId (chatId) → latest sessionWebhook for replies
+  // Map inbound message id → its sessionWebhook for replies.
   private webhooks = new Map<string, { url: string; expires: number }>();
 
-  constructor(config: DingTalkConfig, agent: Agent, log: LogFn, cacheDir: string) {
+  constructor(
+    config: DingTalkConfig,
+    agent: Agent,
+    log: LogFn,
+    cacheDir: string,
+    channelInstanceId: string,
+    actorId: string,
+  ) {
     this.agent = agent;
     this.log = log;
     this.cacheDir = cacheDir;
+    this.channelInstanceId = channelInstanceId;
+    this.actorId = actorId;
     this.clientId = config.client_id;
 
     this.client = new DWClient({
@@ -95,22 +113,31 @@ export class DingTalkBot {
     this.streamHandler = handler;
   }
 
+  public isConnected(): boolean {
+    return this.client.connected;
+  }
+
   /** Get the latest webhook for a session, if still valid. */
-  private getWebhook(chatId: string): string | null {
-    const entry = this.webhooks.get(chatId);
+  private getWebhook(target: ChannelTarget): string | null {
+    if (!target.replyTo) return null;
+    const entry = this.webhooks.get(target.replyTo);
     if (!entry) return null;
     if (Date.now() >= entry.expires) {
-      this.webhooks.delete(chatId);
+      this.webhooks.delete(target.replyTo);
       return null;
     }
     return entry.url;
   }
 
+  private releaseWebhook(target: ChannelTarget): void {
+    if (target.replyTo) this.webhooks.delete(target.replyTo);
+  }
+
   /** Send a text reply to a DingTalk session via the sessionWebhook URL. */
-  async sendText(chatId: string, text: string): Promise<void> {
-    const webhook = this.getWebhook(chatId);
+  async sendText(target: ChannelTarget, text: string): Promise<void> {
+    const webhook = this.getWebhook(target);
     if (!webhook) {
-      this.log("warn", `no valid webhook for channel=${chatId}, dropping reply`);
+      this.log("warn", `no valid webhook for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
@@ -129,10 +156,10 @@ export class DingTalkBot {
   }
 
   /** Send a markdown reply via the sessionWebhook URL. */
-  async sendMarkdown(chatId: string, title: string, markdown: string): Promise<void> {
-    const webhook = this.getWebhook(chatId);
+  async sendMarkdown(target: ChannelTarget, title: string, markdown: string): Promise<void> {
+    const webhook = this.getWebhook(target);
     if (!webhook) {
-      this.log("warn", `no valid webhook for channel=${chatId}, dropping reply`);
+      this.log("warn", `no valid webhook for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
       return;
     }
     try {
@@ -189,15 +216,8 @@ export class DingTalkBot {
     const senderId = msg.senderStaffId ?? "unknown";
     const msgId = (msg.msgId as string | undefined) ?? "unknown";
 
-    // Diagnostic: log the raw shape of non-text messages so we can see the
-    // exact field layout DingTalk uses for picture / richText. Rendered as
-    // a truncated one-liner so it doesn't blow up the log.
     if (msg.msgtype !== "text") {
-      const raw = JSON.stringify(msg);
-      this.log(
-        "debug",
-        `raw msgtype=${msg.msgtype} chat=${chatId}: ${raw.slice(0, 800)}`,
-      );
+      this.log("debug", `received msgtype=${msg.msgtype} chat=${chatId}`);
     }
 
     // Cache the webhook for replies (always, even for non-text messages)
@@ -205,8 +225,22 @@ export class DingTalkBot {
       const expires = msg.sessionWebhookExpiredTime
         ? msg.sessionWebhookExpiredTime
         : Date.now() + 5 * 60 * 1000; // default 5 min
-      this.webhooks.set(chatId, { url: msg.sessionWebhook, expires });
+      this.webhooks.set(msgId, { url: msg.sessionWebhook, expires });
     }
+
+    const isDirectMessage = msg.conversationType === "1";
+    const inboundContext = {
+      channelInstanceId: this.channelInstanceId,
+      actorId: this.actorId,
+      chatId,
+      senderId,
+      platformMessageId: msgId,
+      scope: isDirectMessage ? "dm" : "group",
+      // DingTalk robot group callbacks are only delivered for messages that
+      // explicitly address the robot.
+      addressedBy: isDirectMessage ? "dm" : "mention",
+    } satisfies ChannelInboundContext;
+    const target = channelTargetFromInboundContext(inboundContext);
 
     // Build content blocks based on msgtype. For picture and richText we
     // download the referenced images into the plugin cache and emit
@@ -221,6 +255,7 @@ export class DingTalkBot {
         const text = msg.text?.content?.trim() ?? "";
         if (!text) {
           this.log("debug", `empty text message ignored chat=${chatId}`);
+          this.releaseWebhook(target);
           return;
         }
         contentBlocks.push({ type: "text", text });
@@ -246,7 +281,7 @@ export class DingTalkBot {
           (err: unknown) => {
             this.log(
               "warn",
-              `failed to download image chat=${chatId} code=${downloadCode}: ${extractErrorMessage(err)}`,
+              `failed to download image chat=${chatId}: ${extractErrorMessage(err)}`,
             );
             return null;
           },
@@ -322,6 +357,7 @@ export class DingTalkBot {
 
         if (contentBlocks.length === 0) {
           this.log("debug", `empty richText ignored chat=${chatId}`);
+          this.releaseWebhook(target);
           return;
         }
         preview = combined.slice(0, 60) || `(richText: ${downloadedCount}/${downloadCodes.length} images)`;
@@ -331,35 +367,52 @@ export class DingTalkBot {
         this.log("warn", `unsupported msgtype=${msg.msgtype} chat=${chatId}`);
         // Tell the user we got something we can't handle
         await this.sendText(
-          chatId,
+          target,
           `(Unsupported message type: ${msg.msgtype}. Please send text.)`,
         );
+        this.releaseWebhook(target);
         return;
       }
     }
 
-    if (contentBlocks.length === 0) return;
+    if (contentBlocks.length === 0) {
+      this.releaseWebhook(target);
+      return;
+    }
 
     this.log("debug", `message chat=${chatId} sender=${senderId} type=${msg.msgtype} preview=${preview}`);
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
-    if (firstText && this.streamHandler?.consumePendingText(chatId, firstText)) {
+    if (firstText && isChannelStopCommand(firstText)) {
+      await cancelChannelPrompt(this.agent, { context: inboundContext });
+      this.releaseWebhook(target);
       return;
     }
 
-    this.streamHandler?.onPromptSent(chatId);
+    if (firstText && this.streamHandler?.consumePendingText(target, firstText)) {
+      this.releaseWebhook(target);
+      return;
+    }
+
+    this.streamHandler?.onPromptSent(target);
 
     try {
-      const response = await this.agent.prompt({
-        sessionId: chatId,
+      const response = await sendChannelPrompt(this.agent, {
+        context: inboundContext,
         prompt: contentBlocks,
       });
+      if (!response) {
+        await this.streamHandler?.onTurnEnd(target);
+        return;
+      }
       this.log("info", `prompt done chat=${chatId} stopReason=${response.stopReason}`);
-      this.streamHandler?.onTurnEnd(chatId);
+      await this.streamHandler?.onTurnEnd(target);
     } catch (error: unknown) {
       const errMsg = extractErrorMessage(error);
       this.log("error", `prompt failed chat=${chatId}: ${errMsg}`);
-      this.streamHandler?.onTurnError(chatId, errMsg);
+      await this.streamHandler?.onTurnError(target, errMsg);
+    } finally {
+      this.releaseWebhook(target);
     }
   }
 
@@ -441,7 +494,10 @@ export class DingTalkBot {
     const fileRes = await axios.get<ArrayBuffer>(downloadUrl, {
       responseType: "arraybuffer",
       timeout: 30000,
+      maxContentLength: MAX_MEDIA_BYTES,
+      maxBodyLength: MAX_MEDIA_BYTES,
     });
+    assertDeclaredSizeWithinLimit(fileRes.headers);
     const buffer = Buffer.from(fileRes.data);
 
     // Infer extension from Content-Type, defaulting to .jpg.
