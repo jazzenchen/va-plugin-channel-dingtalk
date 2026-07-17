@@ -10,6 +10,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import axios from "axios";
+import { assertDeclaredSizeWithinLimit, MAX_MEDIA_BYTES } from "./bounded-response.js";
 import {
   DWClient,
   TOPIC_ROBOT,
@@ -215,15 +216,8 @@ export class DingTalkBot {
     const senderId = msg.senderStaffId ?? "unknown";
     const msgId = (msg.msgId as string | undefined) ?? "unknown";
 
-    // Diagnostic: log the raw shape of non-text messages so we can see the
-    // exact field layout DingTalk uses for picture / richText. Rendered as
-    // a truncated one-liner so it doesn't blow up the log.
     if (msg.msgtype !== "text") {
-      const raw = JSON.stringify(msg);
-      this.log(
-        "debug",
-        `raw msgtype=${msg.msgtype} chat=${chatId}: ${raw.slice(0, 800)}`,
-      );
+      this.log("debug", `received msgtype=${msg.msgtype} chat=${chatId}`);
     }
 
     // Cache the webhook for replies (always, even for non-text messages)
@@ -287,7 +281,7 @@ export class DingTalkBot {
           (err: unknown) => {
             this.log(
               "warn",
-              `failed to download image chat=${chatId} code=${downloadCode}: ${extractErrorMessage(err)}`,
+              `failed to download image chat=${chatId}: ${extractErrorMessage(err)}`,
             );
             return null;
           },
@@ -500,7 +494,10 @@ export class DingTalkBot {
     const fileRes = await axios.get<ArrayBuffer>(downloadUrl, {
       responseType: "arraybuffer",
       timeout: 30000,
+      maxContentLength: MAX_MEDIA_BYTES,
+      maxBodyLength: MAX_MEDIA_BYTES,
     });
+    assertDeclaredSizeWithinLimit(fileRes.headers);
     const buffer = Buffer.from(fileRes.data);
 
     // Infer extension from Content-Type, defaulting to .jpg.
