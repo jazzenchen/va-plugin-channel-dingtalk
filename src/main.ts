@@ -13,7 +13,7 @@ import { AgentStreamHandler } from "./agent-stream.js";
 
 runChannelPlugin({
   name: "vibearound-dingtalk",
-  version: "0.1.0",
+  version: "0.6.3",
   requiredConfig: ["client_id", "client_secret"],
   createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new DingTalkBot(
