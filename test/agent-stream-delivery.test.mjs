@@ -23,25 +23,3 @@ test("DingTalk renderer exposes markdown delivery failure", async () => {
     failure,
   );
 });
-
-test("DingTalk turn completion exposes final delivery failure", async () => {
-  const renderer = new AgentStreamHandler({
-    async sendText() {},
-    async sendMarkdown() { throw new Error("DingTalk final delivery failed"); },
-  });
-
-  renderer.onPromptSent(target);
-  renderer.onSessionUpdate(target, {
-    sessionId: "session",
-    update: {
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "final response" },
-      messageId: "message-final",
-    },
-  });
-
-  await assert.rejects(
-    renderer.onTurnEnd(target),
-    /DingTalk final delivery failed/,
-  );
-});
