@@ -9,6 +9,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import axios from "axios";
 import { assertDeclaredSizeWithinLimit, MAX_MEDIA_BYTES } from "./bounded-response.js";
 import {
@@ -277,7 +278,7 @@ export class DingTalkBot {
           contentBlocks.push({ type: "text", text: "The user sent an image." });
           contentBlocks.push({
             type: "resource_link",
-            uri: `file://${local.path}`,
+            uri: pathToFileURL(local.path).href,
             name: local.fileName,
             mimeType: local.mimeType,
           });
@@ -331,7 +332,7 @@ export class DingTalkBot {
           if (local) {
             contentBlocks.push({
               type: "resource_link",
-              uri: `file://${local.path}`,
+              uri: pathToFileURL(local.path).href,
               name: local.fileName,
               mimeType: local.mimeType,
             });
