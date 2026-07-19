@@ -238,7 +238,6 @@ export class DingTalkBot {
     // media to the agent so ACPPod can relocate them into the workspace
     // cache where Claude can actually read them.
     const contentBlocks: ContentBlock[] = [];
-    let preview = "";
 
     switch (msg.msgtype) {
       case "text": {
@@ -249,7 +248,6 @@ export class DingTalkBot {
           return;
         }
         contentBlocks.push({ type: "text", text });
-        preview = text;
         break;
       }
       case "picture":
@@ -264,7 +262,6 @@ export class DingTalkBot {
             type: "text",
             text: "[The user sent an image but the download code was missing.]",
           });
-          preview = "(image:nodl)";
           break;
         }
         const local = await this.downloadImage(chatId, msgId, 0, downloadCode).catch(
@@ -284,13 +281,11 @@ export class DingTalkBot {
             name: local.fileName,
             mimeType: local.mimeType,
           });
-          preview = "(image)";
         } else {
           contentBlocks.push({
             type: "text",
             text: "[The user sent an image but the download failed. Please ask them to describe it.]",
           });
-          preview = "(image:dlerr)";
         }
         break;
       }
@@ -321,7 +316,6 @@ export class DingTalkBot {
           });
         }
 
-        let downloadedCount = 0;
         for (let i = 0; i < downloadCodes.length; i += 1) {
           const code = downloadCodes[i];
           if (!code) continue;
@@ -341,7 +335,6 @@ export class DingTalkBot {
               name: local.fileName,
               mimeType: local.mimeType,
             });
-            downloadedCount += 1;
           }
         }
 
@@ -350,7 +343,6 @@ export class DingTalkBot {
           this.releaseWebhook(target);
           return;
         }
-        preview = combined.slice(0, 60) || `(richText: ${downloadedCount}/${downloadCodes.length} images)`;
         break;
       }
       default: {
@@ -370,7 +362,10 @@ export class DingTalkBot {
       return;
     }
 
-    this.log("debug", `message chat=${chatId} sender=${senderId} type=${msg.msgtype} preview=${preview}`);
+    this.log(
+      "debug",
+      `message chat=${chatId} sender=${senderId} type=${msg.msgtype} blocks=${contentBlocks.length}`,
+    );
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
     if (firstText && isChannelStopCommand(firstText)) {
