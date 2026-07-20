@@ -27,7 +27,7 @@ runChannelPlugin({
       channelInstanceId,
       actorId,
     ),
-  createRenderer: (bot, log, verbose) =>
-    new AgentStreamHandler(bot, log, verbose),
+  createRenderer: (bot, _log, verbose) =>
+    new AgentStreamHandler(bot, verbose),
   healthCheck: async (bot) => bot.isConnected(),
 });
