@@ -9,6 +9,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import axios from "axios";
 import { assertDeclaredSizeWithinLimit, MAX_MEDIA_BYTES } from "./bounded-response.js";
 import {
@@ -137,44 +138,32 @@ export class DingTalkBot {
   async sendText(target: ChannelTarget, text: string): Promise<void> {
     const webhook = this.getWebhook(target);
     if (!webhook) {
-      this.log("warn", `no valid webhook for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
-      return;
+      throw new Error("DingTalk reply webhook is unavailable");
     }
-    try {
-      await axios.post(
-        webhook,
-        {
-          msgtype: "text",
-          text: { content: text },
-        },
-        { timeout: 10000 },
-      );
-    } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `sendText failed: ${err.message ?? String(e)}`);
-    }
+    await axios.post(
+      webhook,
+      {
+        msgtype: "text",
+        text: { content: text },
+      },
+      { timeout: 10000 },
+    );
   }
 
   /** Send a markdown reply via the sessionWebhook URL. */
   async sendMarkdown(target: ChannelTarget, title: string, markdown: string): Promise<void> {
     const webhook = this.getWebhook(target);
     if (!webhook) {
-      this.log("warn", `no valid webhook for target=${target.chatId}/${target.replyTo ?? "route"}, dropping reply`);
-      return;
+      throw new Error("DingTalk reply webhook is unavailable");
     }
-    try {
-      await axios.post(
-        webhook,
-        {
-          msgtype: "markdown",
-          markdown: { title, text: markdown },
-        },
-        { timeout: 10000 },
-      );
-    } catch (e) {
-      const err = e as { message?: string };
-      this.log("error", `sendMarkdown failed: ${err.message ?? String(e)}`);
-    }
+    await axios.post(
+      webhook,
+      {
+        msgtype: "markdown",
+        markdown: { title, text: markdown },
+      },
+      { timeout: 10000 },
+    );
   }
 
   async start(): Promise<void> {
@@ -182,8 +171,10 @@ export class DingTalkBot {
     this.client.registerCallbackListener(TOPIC_ROBOT, (res: DWClientDownStream) => {
       try {
         const robotMessage = JSON.parse(res.data) as RobotMessageAny;
-        // Fire-and-forget — DingTalk SDK callback signature is sync
-        void this.handleRobotMessage(robotMessage);
+        // DingTalk requires a sync callback, so terminate the async boundary here.
+        void this.handleRobotMessage(robotMessage).catch((error: unknown) => {
+          this.log("error", `robot message failed: ${extractErrorMessage(error)}`);
+        });
       } catch (e) {
         this.log("error", `failed to parse robot message: ${e}`);
       }
@@ -248,7 +239,6 @@ export class DingTalkBot {
     // media to the agent so ACPPod can relocate them into the workspace
     // cache where Claude can actually read them.
     const contentBlocks: ContentBlock[] = [];
-    let preview = "";
 
     switch (msg.msgtype) {
       case "text": {
@@ -259,7 +249,6 @@ export class DingTalkBot {
           return;
         }
         contentBlocks.push({ type: "text", text });
-        preview = text;
         break;
       }
       case "picture":
@@ -274,7 +263,6 @@ export class DingTalkBot {
             type: "text",
             text: "[The user sent an image but the download code was missing.]",
           });
-          preview = "(image:nodl)";
           break;
         }
         const local = await this.downloadImage(chatId, msgId, 0, downloadCode).catch(
@@ -290,17 +278,15 @@ export class DingTalkBot {
           contentBlocks.push({ type: "text", text: "The user sent an image." });
           contentBlocks.push({
             type: "resource_link",
-            uri: `file://${local.path}`,
+            uri: pathToFileURL(local.path).href,
             name: local.fileName,
             mimeType: local.mimeType,
           });
-          preview = "(image)";
         } else {
           contentBlocks.push({
             type: "text",
             text: "[The user sent an image but the download failed. Please ask them to describe it.]",
           });
-          preview = "(image:dlerr)";
         }
         break;
       }
@@ -331,7 +317,6 @@ export class DingTalkBot {
           });
         }
 
-        let downloadedCount = 0;
         for (let i = 0; i < downloadCodes.length; i += 1) {
           const code = downloadCodes[i];
           if (!code) continue;
@@ -347,11 +332,10 @@ export class DingTalkBot {
           if (local) {
             contentBlocks.push({
               type: "resource_link",
-              uri: `file://${local.path}`,
+              uri: pathToFileURL(local.path).href,
               name: local.fileName,
               mimeType: local.mimeType,
             });
-            downloadedCount += 1;
           }
         }
 
@@ -360,17 +344,19 @@ export class DingTalkBot {
           this.releaseWebhook(target);
           return;
         }
-        preview = combined.slice(0, 60) || `(richText: ${downloadedCount}/${downloadCodes.length} images)`;
         break;
       }
       default: {
         this.log("warn", `unsupported msgtype=${msg.msgtype} chat=${chatId}`);
         // Tell the user we got something we can't handle
-        await this.sendText(
-          target,
-          `(Unsupported message type: ${msg.msgtype}. Please send text.)`,
-        );
-        this.releaseWebhook(target);
+        try {
+          await this.sendText(
+            target,
+            `(Unsupported message type: ${msg.msgtype}. Please send text.)`,
+          );
+        } finally {
+          this.releaseWebhook(target);
+        }
         return;
       }
     }
@@ -380,7 +366,10 @@ export class DingTalkBot {
       return;
     }
 
-    this.log("debug", `message chat=${chatId} sender=${senderId} type=${msg.msgtype} preview=${preview}`);
+    this.log(
+      "debug",
+      `message chat=${chatId} sender=${senderId} type=${msg.msgtype} blocks=${contentBlocks.length}`,
+    );
 
     const firstText = contentBlocks[0]?.type === "text" ? contentBlocks[0].text : "";
     if (firstText && isChannelStopCommand(firstText)) {
