@@ -349,11 +349,14 @@ export class DingTalkBot {
       default: {
         this.log("warn", `unsupported msgtype=${msg.msgtype} chat=${chatId}`);
         // Tell the user we got something we can't handle
-        await this.sendText(
-          target,
-          `(Unsupported message type: ${msg.msgtype}. Please send text.)`,
-        );
-        this.releaseWebhook(target);
+        try {
+          await this.sendText(
+            target,
+            `(Unsupported message type: ${msg.msgtype}. Please send text.)`,
+          );
+        } finally {
+          this.releaseWebhook(target);
+        }
         return;
       }
     }

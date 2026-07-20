@@ -55,3 +55,24 @@ test("DingTalk adapter propagates webhook request failure", async () => {
     axios.post = originalPost;
   }
 });
+
+test("DingTalk releases an unsupported-message webhook when its reply fails", async () => {
+  const bot = createBot();
+  const failure = new Error("DingTalk unsupported reply failed");
+  bot.sendText = async () => { throw failure; };
+
+  await assert.rejects(
+    bot.handleRobotMessage({
+      msgtype: "audio",
+      conversationId: target.chatId,
+      conversationType: "1",
+      senderStaffId: "sender-1",
+      msgId: target.replyTo,
+      sessionWebhook: "https://example.invalid/webhook",
+      sessionWebhookExpiredTime: Date.now() + 60_000,
+    }),
+    failure,
+  );
+
+  assert.equal(bot.webhooks.has(target.replyTo), false);
+});
