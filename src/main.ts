@@ -6,14 +6,20 @@
  * DingTalk uses Stream API (WebSocket) — no public IP required.
  */
 
+import { createRequire } from "node:module";
+
 import { runChannelPlugin } from "@vibearound/plugin-channel-sdk";
 
 import { DingTalkBot } from "./bot.js";
 import { AgentStreamHandler } from "./agent-stream.js";
 
+const packageVersion = (
+  createRequire(import.meta.url)("../package.json") as { version: string }
+).version;
+
 runChannelPlugin({
   name: "vibearound-dingtalk",
-  version: "0.6.6",
+  version: packageVersion,
   requiredConfig: ["client_id", "client_secret"],
   createBot: ({ config, agent, log, cacheDir, channelInstanceId, actorId }) =>
     new DingTalkBot(
